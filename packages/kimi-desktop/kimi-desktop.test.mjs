@@ -222,3 +222,20 @@ test('rejects remote gateway and control endpoints before changing Kimi', async 
     expect(connect({ gateway: { v1: 'http://127.0.0.1:3425/v1', key: 'synthetic' } })['gateway.key']).toBe('synthetic');
   } finally { await f.cleanup(); }
 });
+
+test('per-agent visibility updates the menu and rejects a removed model even during an active turn',async()=>{
+  const f=await fixture();
+  try{
+    await f.controller.tick();
+    const removed=f.controller.catalog.find(x=>x.id==='other-provider/other-model');
+    write(path.join(f.controller.magpieDir,'settings.json'),{pickedModels:{'kimi-desktop':['original-provider/test-model']}});
+    const response=await fetch(f.controller.bridgeURL+'/chat/completions',{method:'POST',headers:{Authorization:'Bearer synthetic-kimi-key'},
+      body:JSON.stringify({model:removed.alias,messages:[]})});
+    expect(response.status).toBe(409);expect(f.requests).toHaveLength(0);
+    const runner=read(f.controller.runnerFile);runner.activeKernelTurns=['synthetic-turn'];write(f.controller.runnerFile,runner);
+    f.controller.catalogAfter=0;await f.controller.tick();
+    expect(f.controller.catalog.map(x=>x.id)).toEqual(['original-provider/test-model']);
+    expect(read(f.controller.catalogFile)).toMatchObject({exclusive:true,enabled:true});
+    expect(read(f.controller.catalogFile).models).toHaveLength(1);
+  }finally{await f.cleanup();}
+});

@@ -32,3 +32,5 @@ No Kimi binaries, personal configuration, prompts, account identifiers or creden
 ```sh
 bun test packages/kimi-desktop/kimi-desktop.test.mjs
 ```
+
+The model catalog respects Magpie's per-agent visibility, picked/hidden models, global disables and model order. Removed selections are refused on new requests even during a running turn. An existing separately installed native menu patch can use `menu-hook.cjs` to show only the selected models while connected; the package does not install or modify that client patch. The icon is Kimi's desktop application icon.

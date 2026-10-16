@@ -5,7 +5,7 @@ const clean = value => typeof value === 'string' && value.length <= 2048 && !/[\
 const positive = (value, fallback) => Number.isSafeInteger(value) && value > 0 ? value : fallback;
 const effortNames = { none: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' };
 
-export function normalizeModels(payload) {
+export function normalizeModels(payload, {allowEmpty=false}={}) {
   if (!Array.isArray(payload?.data) || payload.has_more || payload.data.length > 50000) throw Error('catalog_invalid');
   const models = new Map();
   for (const row of payload.data) {
@@ -33,7 +33,7 @@ export function normalizeModels(payload) {
         defaultEffort: thinking, protocol: '', betaApi: false, reasoningKey: ''},
     }});
   }
-  if (!models.size) throw Error('catalog_empty');
+  if (!models.size && !allowEmpty) throw Error('catalog_empty');
   return [...models.values()];
 }
 

@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { rpc } from './rpc.mjs';
 import { normalizeModels, mergeRuntimeModels, isMenuAlias } from './catalog.mjs';
+import { filterModelCatalog } from './selection.mjs';
 
 const PROVIDER = 'daimon-kimi-code';
 const TOOL_ORIGIN = 'https://agent-gw.kimi.com';
@@ -57,9 +58,10 @@ export function defaultKimiDirectory(home = os.homedir()) {
 }
 
 export class KimiAdapter {
-  constructor({ home = os.homedir(), stateDir, kimiDir, intervalMs = 1000, stabilityMs = 2000,
+  constructor({ home = os.homedir(), stateDir, kimiDir, magpieDir, intervalMs = 1000, stabilityMs = 2000,
     rpcCall = rpc, fetchImpl = globalThis.fetch, log = () => {} } = {}) {
     this.stateDir = stateDir || path.join(home, '.config', 'magpie-kimi');
+    this.magpieDir = magpieDir || (stateDir ? path.join(path.dirname(stateDir),'magpie') : path.join(home,'.config','magpie'));
     this.kimiDir = kimiDir || defaultKimiDirectory(home);
     this.configFile = path.join(this.kimiDir, 'config.json');
     this.runnerFile = path.join(this.kimiDir, 'agents', 'main', 'runner.state.json');
@@ -126,6 +128,21 @@ export class KimiAdapter {
 
   saveState() { atomicJSON(this.stateFile, this.state); }
 
+  catalogPolicy() {
+    const load=name=>{try{return readJSON(path.join(this.magpieDir,name));}catch(error){if(error.code==='ENOENT')return {};throw Error('catalog_policy_unavailable');}};
+    return {settings:load('settings.json'),providers:load('providers.json')};
+  }
+
+  selectedCatalog(payload) {
+    const {settings,providers}=this.catalogPolicy();
+    return filterModelCatalog(payload,settings,providers);
+  }
+
+  publishCatalog(desired) {
+    atomicJSON(this.catalogFile,{schemaVersion:1,enabled:true,exclusive:true,updatedAt:new Date().toISOString(),
+      selectedAlias:this.catalog.find(x=>x.id===desired.model)?.alias||'',models:this.catalog.map(x=>x.menu)});
+  }
+
   // Change one field in the newest document; never restore stale login tokens.
   changeBase(expected, replacement) {
     const before = fs.readFileSync(this.configFile), doc = JSON.parse(before.toString('utf8').replace(/^\uFEFF/, ''));
@@ -187,7 +204,9 @@ export class KimiAdapter {
       if (inference) {
         const selected = this.catalog.find(x => x.alias === payload.model);
         if (!selected && isMenuAlias(payload.model)) { error(409, 'model_no_longer_available'); return; }
-        payload.model = selected?.id || active.model;
+        const model=selected?.id||active.model;
+        if(!this.selectedCatalog({data:[{id:model}]}).data.length){error(409,'model_not_enabled_for_kimi');return;}
+        payload.model = model;
       }
       const headers = { 'Content-Type': 'application/json',
         Authorization: inference ? 'Bearer ' + active.gatewayKey : req.headers.authorization };
@@ -255,20 +274,22 @@ export class KimiAdapter {
       // Long Work turns must retain their menu entries. Refresh the local
       // liveness timestamp without changing models or reloading a busy runtime.
       try {
+        const keep=new Set(this.selectedCatalog({data:this.catalog.map(x=>({id:x.id}))}).data.map(x=>x.id));
+        this.catalog=this.catalog.filter(x=>keep.has(x.id));
         const saved=readJSON(this.catalogFile);
-        if(saved.enabled && this.catalog.length) atomicJSON(this.catalogFile,{...saved,updatedAt:new Date().toISOString()});
+        if(saved.enabled) this.publishCatalog(desired);
       } catch { /* Initial connection waits until idle. */ }
       return;
     }
     try {
-      // Agent-scoped /models deliberately lists only its selected provider.
-      // The loopback public catalog is Magpie's complete enabled model list.
+      // The agent key's /models may name only its selected provider. Start
+      // from the public catalog, then apply this agent's exact visibility.
       const response = await this.fetchImpl(target + '/models', {method: 'GET', headers: {Accept: 'application/json'},
         signal: AbortSignal.timeout(6000), redirect: 'error', proxy: ''});
       if (!response.ok || Number(response.headers.get('content-length') || 0) > 8 * 1024 * 1024) throw Error('catalog_unavailable');
       const text = await response.text();
       if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw Error('catalog_unavailable');
-      const catalog = normalizeModels(JSON.parse(text));
+      const catalog = normalizeModels(this.selectedCatalog(JSON.parse(text)),{allowEmpty:true});
       const current = await this.rpcCall(runner, 'conversations.getKimiModelList');
       if (!Array.isArray(current?.models)) throw Error('catalog_unavailable');
       const merged = mergeRuntimeModels(current.models, catalog);
@@ -287,8 +308,7 @@ export class KimiAdapter {
         await this.rpcCall(runner, 'conversations.updateKimiModelList', {models: merged});
       }
       this.catalog = catalog;
-      atomicJSON(this.catalogFile, {schemaVersion: 1, enabled: true, updatedAt: new Date().toISOString(),
-        selectedAlias: catalog.find(x => x.id === desired.model)?.alias || '', models: catalog.map(x => x.menu)});
+      this.publishCatalog(desired);
       this.catalogError = null;
     } catch { this.catalogError = 'catalog_sync_failed'; }
   }
