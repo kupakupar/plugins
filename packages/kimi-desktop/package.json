@@ -10,7 +10,8 @@
     "adapter.mjs",
     "rpc.mjs",
     "catalog.mjs",
-    "README.md"
+    "README.md",
+    "COMPATIBILITY.md"
   ],
   "keywords": [
     "magpie",
