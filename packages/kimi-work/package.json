@@ -1,12 +1,11 @@
 {
   "name": "@magpie-community/opencode-kimi-work-auth",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "main": "./index.mjs",
   "files": [
     "index.mjs",
-    "README.md",
-    "icon.mjs"
+    "README.md"
   ],
   "description": "Kimi Work subscription provider using the local desktop sign-in, separate from Kimi Code",
   "magpie": {

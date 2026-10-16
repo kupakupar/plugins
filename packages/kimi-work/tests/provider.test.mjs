@@ -66,6 +66,8 @@ test('models come from Work; usage reports only the shared membership allowance'
   expect(Object.keys(models)).toEqual(['k3-agent']);expect(models['k3-agent'].limit.context).toBe(262144);
   expect(models['k3-agent'].capabilities.input.image).toBe(true);
   const usage=await p.auth.usage(async()=>account);expect(usage.windows).toHaveLength(1);expect(usage.windows[0].used).toBe(42);
+  expect(usage.windows[0]).not.toHaveProperty('resetsAt');
+  expect(usage.windows[0].name).toBe('会员共享额度');
   expect(calls[1].init.headers.Authorization).toBe('Bearer '+session.webToken);
   expect(calls.every(x=>!x.url.includes('api.kimi.com'))).toBe(true);
 });
@@ -74,4 +76,39 @@ test('an upstream usage refusal does not incorrectly invalidate the desktop sign
   const p=I.createPlugin({readSession:()=>session,fetchImpl:async()=>new Response('{}',{status:403})});
   try{await p.auth.usage(async()=>account);throw Error('expected upstream refusal');}
   catch(error){expect(error.signIn).toBeUndefined();expect(error.message).toContain('403');}
+});
+
+test('the real redacted catalog and additional advertised reasoning levels are preserved',()=>{
+  const payload=JSON.parse(fs.readFileSync(new URL('./fixtures/work-models.redacted.json',import.meta.url),'utf8'));
+  const rows=I.modelRows(payload);
+  for(const m of payload.data) {
+    expect(Object.keys(rows[m.id].variants)).toEqual(m.reasoningEffortOptions.map(x=>x.effort.replace('REASONING_EFFORT_','').toLowerCase()));
+  }
+  const additional={...payload.data[0],reasoningEffortOptions:[
+    {effort:'REASONING_EFFORT_STANDARD'},{effort:'REASONING_EFFORT_ULTRA'},
+  ]};
+  expect(I.modelRows({data:[additional]})[additional.id].variants).toEqual({
+    standard:{reasoningEffort:'standard'},ultra:{reasoningEffort:'ultra'},
+  });
+});
+
+test('Request inputs preserve body, safe headers and cancellation while replacing desktop credentials',async()=>{
+  const calls=[];
+  const p=I.createPlugin({readSession:()=>session,fetchImpl:async(url,init)=>{
+    calls.push({url,init,body:await new Response(init.body).text()});return json({choices:[]});
+  }});
+  const loader=await p.auth.loader(async()=>account),abort=new AbortController();
+  const body=JSON.stringify({model:'k3-agent',messages:[{role:'user',content:'synthetic Request'}],stream:true});
+  const request=new Request(I.BASE+'/chat/completions',{method:'POST',body,signal:abort.signal,
+    headers:{Authorization:'Bearer synthetic-wrong-key',Cookie:'synthetic-cookie','X-Request-Tag':'synthetic-tag'}});
+  await loader.fetch(request);
+  expect(calls[0].url).toBe(I.BASE+'/chat/completions');
+  expect(calls[0].body).toBe(body);
+  expect(calls[0].init.headers.get('authorization')).toBe('Bearer '+session.workToken);
+  expect(calls[0].init.headers.get('cookie')).toBeNull();
+  expect(calls[0].init.headers.get('x-request-tag')).toBe('synthetic-tag');
+  abort.abort();expect(calls[0].init.signal.aborted).toBe(true);
+  await expect(loader.fetch(new Request('https://example.invalid/chat/completions',{method:'POST',body:'{}'}))).rejects.toThrow();
+  await expect(loader.fetch(new Request(I.BASE+'/chat/completions',{method:'GET'}))).rejects.toThrow();
+  expect(calls).toHaveLength(1);
 });

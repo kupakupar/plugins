@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import {icon} from './icon.mjs';
 import os from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
@@ -7,7 +6,8 @@ import {createHash} from 'node:crypto';
 const ID = 'kimi-work';
 const BASE = 'https://agent-gw.kimi.com/coding/v1';
 const MEMBER = 'https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/';
-const UA = 'Magpie Kimi Work provider/0.1.2';
+const {version} = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+const UA = 'Magpie Kimi Work provider/' + version;
 const expired = () => Object.assign(Error('请先在本机 Kimi 桌面版登录 Work，再重新连接 Kimi Work 供应商。'), {signIn:'expired'});
 const percent = x => typeof x === 'number' && Number.isFinite(x) ? Math.max(0,Math.min(100,x*100)) : undefined;
 
@@ -38,10 +38,11 @@ function modelRows(payload) {
   const out={};
   for(const m of payload.data) {
     if(typeof m.id!=='string'||!m.id||m.id.length>256||/[\x00-\x20/]/.test(m.id)) continue;
-    const variants={};
+    const variants=Object.create(null);
     for(const x of m.reasoningEffortOptions||[]) {
       const effort=String(x.effort||'').replace(/^REASONING_EFFORT_/,'').toLowerCase();
-      if(['low','medium','high','max'].includes(effort)) variants[effort]={reasoningEffort:effort};
+      if(!/^[a-z][a-z0-9_-]{0,63}$/.test(effort))throw Error('Kimi Work 思考档位格式无效。');
+      variants[effort]={reasoningEffort:effort};
     }
     out[m.id]={id:m.id,name:m.display_name||m.id,
       api:{id:m.id,url:BASE,npm:'@ai-sdk/openai-compatible'},
@@ -82,7 +83,6 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch}={}) {
     },
     auth:{
       provider:ID,
-      icon,
       maxConcurrency:1,
       methods:[{type:'oauth',label:'使用本机 Kimi Work 登录',authorize:async()=>({
         url:'',method:'auto',instructions:'读取本机 Kimi 桌面版的 Work 登录；不会使用 Kimi Code API Key。',
@@ -99,20 +99,22 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch}={}) {
       loader:async getAuth=>({
         baseURL:BASE,apiKey:'local-desktop-session',
         async fetch(input,init={}) {
-          const url=new URL(String(input));
+          const request=input instanceof Request?new Request(input,init):null;
+          const url=new URL(request?request.url:String(input));
           if(url.origin!==new URL(BASE).origin||url.pathname!=='/coding/v1/chat/completions'
-            ||url.username||url.password||url.search||url.hash||init.method&&init.method!=='POST') {
+            ||url.username||url.password||url.search||url.hash||(request?.method||init.method||'POST')!=='POST') {
             throw Error('Kimi Work 仅接受官方 Work 网关的模型请求。');
           }
           const s=current(await getAuth());
-          const headers=new Headers(init.headers);
+          const headers=new Headers(request?request.headers:init.headers);
           for(const key of ['authorization','x-api-key','cookie','host','content-length','origin'])headers.delete(key);
           headers.set('Authorization','Bearer '+s.workToken);
           headers.set('User-Agent',UA);
           headers.set('Content-Type','application/json');
           // Preserve messages, tools, stream and abort signal. There is no
           // fallback to api.kimi.com, a Code API key, or another provider.
-          return fetchImpl(BASE+'/chat/completions',{...init,method:'POST',headers,redirect:'error'});
+          const options=request?{...init,body:request.body,signal:request.signal,duplex:'half'}:init;
+          return fetchImpl(BASE+'/chat/completions',{...options,method:'POST',headers,redirect:'error'});
         },
       }),
       usage:async getAuth=>{
@@ -120,7 +122,7 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch}={}) {
         const j=await jsonRequest(MEMBER+'GetSubscriptionStats',s.webToken,{});
         const b=j.subscriptionBalance,used=percent(b?.amountUsedRatio);
         return {plan:'Kimi Work · 会员共享额度',windows:used===undefined?[]:[{
-          name:'月度会员共享额度',used,resetsAt:b.expireTime||b.upcomingExpiration?.timestamp,
+          name:'会员共享额度',used,
         }]};
       },
     },
