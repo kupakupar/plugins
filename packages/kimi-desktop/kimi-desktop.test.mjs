@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { KimiAdapter } from './adapter.mjs';
 import { controlEndpoint } from './rpc.mjs';
 import { agent, connect } from './kimi-desktop.agent.js';
@@ -15,10 +17,14 @@ async function fixture() {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'magpie-kimi-fixture-'));
   const kimiDir = path.join(directory, 'kimi');
   const requests = [], tools = [], calls = [];
+  const models = [{id:'original-provider/test-model',display_name:'First'}, {id:'other-provider/other-model',display_name:'Second'}];
   const gateway = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/v1/models') {
+      if (req.headers.authorization !== 'Bearer synthetic-magpie-key' || req.headers['user-agent'] !== 'Desktop Kimi Work') {
+        res.writeHead(403); res.end(); return;
+      }
       res.writeHead(200, {'Content-Type':'application/json'});
-      res.end(JSON.stringify({data:[{id:'original-provider/test-model',display_name:'First'}, {id:'other-provider/other-model',display_name:'Second'}]})); return;
+      res.end(JSON.stringify({data:models})); return;
     }
     let body = ''; for await (const chunk of req) body += chunk;
     requests.push({ path: req.url, authorization: req.headers.authorization, body: JSON.parse(body) });
@@ -51,7 +57,7 @@ async function fixture() {
   const connection = { schemaVersion: 1, enabled: true, model: 'original-provider/test-model',
     gateway: { url: 'http://127.0.0.1:' + gateway.address().port + '/v1', key: 'synthetic-magpie-key' }, requestId: 1 };
   write(controller.connectionFile, connection);
-  return { directory, controller, doc, connection, requests, tools, calls,
+  return { directory, controller, doc, connection, requests, tools, calls, models,
     cleanup: async () => { await controller.stop(); gateway.closeAllConnections(); await new Promise(resolve => gateway.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }); } };
 }
 
@@ -124,6 +130,8 @@ test('disconnect restores one address while retaining refreshed credentials and 
     expect(after.credentials.kimiCode.refreshToken).toBe('synthetic-refresh-rotated');
     expect(after.unrelated.newSetting).toBe('preserved');
     expect(f.calls.at(-1).method).toBe('conversations.setModel');
+    expect(fs.existsSync(f.controller.modelBackupFile)).toBe(false);
+    expect(fs.existsSync(path.join(f.controller.stateDir, 'backups'))).toBe(false);
   } finally { await f.cleanup(); }
 });
 
@@ -223,12 +231,16 @@ test('rejects remote gateway and control endpoints before changing Kimi', async 
   } finally { await f.cleanup(); }
 });
 
-test('per-agent visibility updates the menu and rejects a removed model even during an active turn',async()=>{
+test('the identified gateway catalog updates visibility without opening Magpie files, even during an active turn',async()=>{
   const f=await fixture();
   try{
     await f.controller.tick();
     const removed=f.controller.catalog.find(x=>x.id==='other-provider/other-model');
-    write(path.join(f.controller.magpieDir,'settings.json'),{pickedModels:{'kimi-desktop':['original-provider/test-model']}});
+    const magpieDir = path.join(f.directory, 'magpie');
+    fs.mkdirSync(magpieDir);
+    fs.writeFileSync(path.join(magpieDir, 'providers.json'), 'not JSON: must never be opened');
+    fs.writeFileSync(path.join(magpieDir, 'settings.json'), 'not JSON: policy belongs to gateway');
+    f.models.splice(1);
     const response=await fetch(f.controller.bridgeURL+'/chat/completions',{method:'POST',headers:{Authorization:'Bearer synthetic-kimi-key'},
       body:JSON.stringify({model:removed.alias,messages:[]})});
     expect(response.status).toBe(409);expect(f.requests).toHaveLength(0);
@@ -238,4 +250,52 @@ test('per-agent visibility updates the menu and rejects a removed model even dur
     expect(read(f.controller.catalogFile)).toMatchObject({exclusive:true,enabled:true});
     expect(read(f.controller.catalogFile).models).toHaveLength(1);
   }finally{await f.cleanup();}
+});
+
+test('reconnects retain only changed model fields, never a full credential backup', async () => {
+  const f = await fixture();
+  try {
+    for (let i = 0; i < 2; i++) {
+      write(f.controller.connectionFile, f.connection);
+      f.controller.catalogAfter = 0;
+      await f.controller.tick();
+      expect(f.controller.status.code).toBe('connected');
+      const saved = fs.readdirSync(f.controller.stateDir).map(name => fs.readFileSync(path.join(f.controller.stateDir, name), 'utf8')).join('\n');
+      expect(saved).not.toContain('synthetic-kimi-key');
+      expect(saved).not.toContain('synthetic-refresh-before');
+      write(f.controller.connectionFile, {...f.connection, enabled: false});
+      await f.controller.tick();
+      expect(fs.existsSync(f.controller.modelBackupFile)).toBe(false);
+    }
+  } finally { await f.cleanup(); }
+});
+
+test('disconnect restores the address even when Kimi removes a private catalog method', async () => {
+  const f = await fixture();
+  try {
+    await f.controller.tick();
+    f.controller.rpcCall = async () => {throw Error('kimi_control_rejected');};
+    write(f.controller.connectionFile, {...f.connection, enabled: false});
+    await f.controller.tick();
+    expect(read(f.controller.configFile).model.providers['daimon-kimi-code'].baseUrl).toBe(official);
+    expect(read(f.controller.configFile).credentials).toEqual(f.doc.credentials);
+    expect(fs.existsSync(f.controller.modelBackupFile)).toBe(true);
+    expect(f.controller.state.active).toBe(false);
+  } finally {await f.cleanup();}
+});
+
+test('loading an agent never installs signal handlers in the shared plugin host', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kimi-empty-host-'));
+  const entry = pathToFileURL(fileURLToPath(new URL('./index.mjs', import.meta.url))).href;
+  try {
+    const child = spawnSync(process.execPath, ['--eval', `
+      const before = ['SIGTERM','SIGINT'].map(s => process.listenerCount(s));
+      const plugin = (await import(${JSON.stringify(entry)})).default;
+      await plugin({});
+      if (['SIGTERM','SIGINT'].some((s,i) => process.listenerCount(s) !== before[i])) throw Error('shared signal handlers changed');
+      console.log('host preserved');
+    `], {env: {...process.env, HOME: home, USERPROFILE: home, APPDATA: home}, encoding: 'utf8', timeout: 10000});
+    expect(child.status).toBe(0);
+    expect(child.stdout).toContain('host preserved');
+  } finally { fs.rmSync(home, {recursive: true, force: true}); }
 });

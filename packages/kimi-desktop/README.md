@@ -22,10 +22,13 @@ The adapter does not reload a busy Work runtime. If Kimi independently changes i
 
 - `~/.config/magpie-kimi/connection.json`: Magpie's selected model and connection.
 - `~/.config/magpie-kimi/status.json`: fixed status categories, without credentials.
-- `~/.config/magpie-kimi/backups/`: original local configuration before connecting; may contain login information and must remain private.
+- `~/.config/magpie-kimi/adapter-state.json`: original service address and connection ownership; no Kimi login credentials.
+- `~/.config/magpie-kimi/before-menu-models.json`: one snapshot of the original model list/current choice, removed after a clean disconnect. No full configuration or credential backup is written.
 - Kimi configuration: `kimi-desktop/daimon-share/daimon/config.json` under the platform's application-support directory.
 
-Verified with Windows 11, Kimi 3.2.17.10 and official Magpie 0.1.1275, including an actual Work request through Magpie. macOS path discovery is implemented but a live macOS Work session has not been tested. The supported runtime has provider `daimon-kimi-code` with original service `https://agent-gw.kimi.com/coding/v1`; other layouts stop with `unsupported_kimi_config`. This internal Kimi protocol may change in later releases.
+Verified with Windows 11, Kimi 3.2.17.10 and official Magpie 0.1.1275, including an actual Work request through Magpie. macOS path discovery is implemented but a live macOS Work session has not been tested. **macOS remains unverified; a path implementation or synthetic test is not a macOS compatibility record.** The supported runtime has provider `daimon-kimi-code` with original service `https://agent-gw.kimi.com/coding/v1`; other layouts stop with `unsupported_kimi_config`.
+
+The private control API is undocumented. Before connecting, the adapter probes `models.current`; a refused/missing method stops connection without changing the service address. A failed `conversations.setModel` rolls back that address. Failures of `conversations.getKimiModelList` or `conversations.updateKimiModelList` report `catalog_sync_failed` and preserve the existing catalog rather than inventing a different protocol. In that case the selected-model bridge may remain connected; disconnect it to return to Kimi's service. No vendor app files are patched, and no automatic upgrade to an unknown protocol is attempted.
 
 No Kimi binaries, personal configuration, prompts, account identifiers or credentials are included. There are no runtime dependencies. Tests use isolated temporary directories and synthetic credentials.
 
@@ -33,4 +36,16 @@ No Kimi binaries, personal configuration, prompts, account identifiers or creden
 bun test packages/kimi-desktop/kimi-desktop.test.mjs
 ```
 
-The model catalog respects Magpie's per-agent visibility, picked/hidden models, global disables and model order. Removed selections are refused on new requests even during a running turn. An existing separately installed native menu patch can use `menu-hook.cjs` to show only the selected models while connected; the package does not install or modify that client patch. The icon is Kimi's desktop application icon.
+The model catalog is fetched from Magpie's `/v1/models` with this agent's credential and registered User-Agent. Magpie owns its visibility, picked/hidden models, disables and ordering. The adapter never opens Magpie's `providers.json` or `settings.json`. It rechecks the gateway catalog before every inference; removed selections are refused even during a running turn, and an unavailable catalog returns a fixed error instead of falling back to an unrestricted list. This package includes no Electron injection hook or model-menu patch. The icon is Kimi's desktop application icon.
+
+## Shutdown and manual recovery
+
+The shared plugin host owns process shutdown. This plugin installs no SIGTERM/SIGINT handler and never calls `process.exit`. On the host's normal exit event it synchronously restores the original address if the current address is still its own; restart Kimi to reload its runtime. An explicit disconnect while both apps are running additionally restores model selection/list through the control API.
+
+A forced kill, power loss or a broken private API can leave Kimi pointing at an inactive loopback bridge. To recover without starting Magpie:
+
+1. Close Kimi normally. In `~/.config/magpie-kimi/connection.json`, set `enabled` to `false` so the adapter does not reconnect when Magpie next starts.
+2. Open Kimi's `config.json` at the application-support path above. Only if `model.providers["daimon-kimi-code"].baseUrl` equals `bridgeURL` in `adapter-state.json`, change that one field to the same state's `originalBase` (normally `https://agent-gw.kimi.com/coding/v1`). Leave `credentials` and all unrelated fields untouched; do not replace the whole document from an old backup.
+3. If `model.current` starts with `magpie-local-`, set it to `current` from `before-menu-models.json` if that alias still exists in `model.models`; otherwise choose an existing native `daimon-kimi-code` alias, such as `k3-agent` or `k2d8-preview`. Remove only `model.models` keys beginning with `magpie-local-` if present. Reopen Kimi; it refreshes its native model catalog.
+
+Older experimental packages created full `backups/before-connect-*.json` copies, which can contain Kimi credentials. This package creates no such files and does not silently delete existing user backups. After recovery, users can remove those older copies locally. Do not upload them in an issue or PR.

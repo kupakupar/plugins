@@ -9,13 +9,11 @@ export default async function KimiDesktop(input) {
         void input?.client?.app?.log?.({ body: { service: 'kimi-desktop', level: 'warn', message: code } })?.catch?.(() => {});
       } catch { /* No configuration, credentials or raw RPC errors in logs. */ }
     };
-    const adapter = await new KimiAdapter({ magpieDir:input?.directory, log }).start();
+    const adapter = await new KimiAdapter({ log }).start();
     globalThis[instance] = adapter;
+    // The shared host owns shutdown. Its normal exit path is synchronous;
+    // never install signal handlers or terminate a host shared with plugins.
     process.once('exit', () => adapter.restoreFileOnExit());
-    // A signal already asks this host to exit. Restore before its termination.
-    for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => {
-      void adapter.stop().finally(() => process.exit(0));
-    });
   }
   return {};
 }

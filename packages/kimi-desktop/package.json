@@ -10,9 +10,7 @@
     "adapter.mjs",
     "rpc.mjs",
     "catalog.mjs",
-    "README.md",
-    "selection.mjs",
-    "menu-hook.cjs"
+    "README.md"
   ],
   "keywords": [
     "magpie",

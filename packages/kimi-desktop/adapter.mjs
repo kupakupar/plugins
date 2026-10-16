@@ -6,7 +6,6 @@ import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { rpc } from './rpc.mjs';
 import { normalizeModels, mergeRuntimeModels, isMenuAlias } from './catalog.mjs';
-import { filterModelCatalog } from './selection.mjs';
 
 const PROVIDER = 'daimon-kimi-code';
 const TOOL_ORIGIN = 'https://agent-gw.kimi.com';
@@ -58,10 +57,9 @@ export function defaultKimiDirectory(home = os.homedir()) {
 }
 
 export class KimiAdapter {
-  constructor({ home = os.homedir(), stateDir, kimiDir, magpieDir, intervalMs = 1000, stabilityMs = 2000,
+  constructor({ home = os.homedir(), stateDir, kimiDir, intervalMs = 1000, stabilityMs = 2000,
     rpcCall = rpc, fetchImpl = globalThis.fetch, log = () => {} } = {}) {
     this.stateDir = stateDir || path.join(home, '.config', 'magpie-kimi');
-    this.magpieDir = magpieDir || (stateDir ? path.join(path.dirname(stateDir),'magpie') : path.join(home,'.config','magpie'));
     this.kimiDir = kimiDir || defaultKimiDirectory(home);
     this.configFile = path.join(this.kimiDir, 'config.json');
     this.runnerFile = path.join(this.kimiDir, 'agents', 'main', 'runner.state.json');
@@ -70,6 +68,7 @@ export class KimiAdapter {
     this.lockFile = path.join(this.stateDir, 'adapter-owner.json');
     this.statusFile = path.join(this.stateDir, 'status.json');
     this.catalogFile = path.join(this.stateDir, 'menu-catalog.json');
+    this.modelBackupFile = path.join(this.stateDir, 'before-menu-models.json');
     this.catalog = [];
     Object.assign(this, { intervalMs, stabilityMs, rpcCall, fetchImpl, log });
     this.ownerID = crypto.randomUUID();
@@ -128,14 +127,16 @@ export class KimiAdapter {
 
   saveState() { atomicJSON(this.stateFile, this.state); }
 
-  catalogPolicy() {
-    const load=name=>{try{return readJSON(path.join(this.magpieDir,name));}catch(error){if(error.code==='ENOENT')return {};throw Error('catalog_policy_unavailable');}};
-    return {settings:load('settings.json'),providers:load('providers.json')};
-  }
-
-  selectedCatalog(payload) {
-    const {settings,providers}=this.catalogPolicy();
-    return filterModelCatalog(payload,settings,providers);
+  async gatewayCatalog(target, key) {
+    // Magpie applies this agent's visibility and model selection. The key
+    // and registered User-Agent identify it; no credential/config file read.
+    const response = await this.fetchImpl(target + '/models', {method: 'GET', headers: {
+      Accept: 'application/json', Authorization: 'Bearer ' + key, 'User-Agent': 'Desktop Kimi Work',
+    }, signal: AbortSignal.timeout(6000), redirect: 'error', proxy: ''});
+    if (!response.ok || Number(response.headers.get('content-length') || 0) > 8 * 1024 * 1024) throw Error('catalog_unavailable');
+    const text = await response.text();
+    if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw Error('catalog_unavailable');
+    return normalizeModels(JSON.parse(text), {allowEmpty: true});
   }
 
   publishCatalog(desired) {
@@ -205,7 +206,10 @@ export class KimiAdapter {
         const selected = this.catalog.find(x => x.alias === payload.model);
         if (!selected && isMenuAlias(payload.model)) { error(409, 'model_no_longer_available'); return; }
         const model=selected?.id||active.model;
-        if(!this.selectedCatalog({data:[{id:model}]}).data.length){error(409,'model_not_enabled_for_kimi');return;}
+        let allowed;
+        try { allowed = await this.gatewayCatalog(active.gatewayURL, active.gatewayKey); }
+        catch { error(503, 'catalog_unavailable'); return; }
+        if (!allowed.some(row => row.id === model)) { error(409, 'model_not_enabled_for_kimi'); return; }
         payload.model = model;
       }
       const headers = { 'Content-Type': 'application/json',
@@ -235,20 +239,24 @@ export class KimiAdapter {
   async restore({ reload = true } = {}) {
     if (!this.state?.active) return;
     let doc = readJSON(this.configFile);
-    if (reload && baseURL(doc) === this.state.bridgeURL && this.catalog.length) {
-      const runner = readJSON(this.runnerFile);
-      const current = await this.rpcCall(runner, 'conversations.getKimiModelList');
-      const native = (current?.models || []).filter(x => !isMenuAlias(x.model));
-      if (native.length) {
-        if (isMenuAlias(doc.model.current)) {
-          let original;
-          try {original=readJSON(path.join(this.stateDir,'before-menu-models.json')).current;} catch {}
-          const alias=native.some(x => x.model === original) ? original : native[0].model;
-          await this.rpcCall(runner,'conversations.setModel',{modelAlias:alias});
+    let modelsRestored = false;
+    if (reload && baseURL(doc) === this.state.bridgeURL) {
+      try {
+        const runner = readJSON(this.runnerFile);
+        const current = await this.rpcCall(runner, 'conversations.getKimiModelList');
+        const native = (current?.models || []).filter(x => !isMenuAlias(x.model));
+        if (native.length) {
+          if (isMenuAlias(doc.model.current)) {
+            let original;
+            try {original=readJSON(this.modelBackupFile).current;} catch {}
+            const alias=native.some(x => x.model === original) ? original : native[0].model;
+            await this.rpcCall(runner,'conversations.setModel',{modelAlias:alias});
+          }
+          if (native.length !== current.models.length) await this.rpcCall(runner,'conversations.updateKimiModelList',{models:native});
+          doc=readJSON(this.configFile);
+          modelsRestored = true;
         }
-        if (native.length !== current.models.length) await this.rpcCall(runner,'conversations.updateKimiModelList',{models:native});
-        doc=readJSON(this.configFile);
-      }
+      } catch { this.report('restored_waiting_kimi'); }
     }
     let changed = false;
     if (baseURL(doc) === this.state.bridgeURL) {
@@ -265,6 +273,10 @@ export class KimiAdapter {
         await this.rpcCall(readJSON(this.runnerFile), 'conversations.setModel', { modelAlias: current.model.current });
       } catch { this.report('restored_waiting_kimi'); }
     }
+    // Only model fields were saved, never the full credentials-bearing config.
+    if (modelsRestored) {
+      try { fs.unlinkSync(this.modelBackupFile); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
   }
 
   async syncCatalog(runner, desired, target) {
@@ -274,7 +286,7 @@ export class KimiAdapter {
       // Long Work turns must retain their menu entries. Refresh the local
       // liveness timestamp without changing models or reloading a busy runtime.
       try {
-        const keep=new Set(this.selectedCatalog({data:this.catalog.map(x=>({id:x.id}))}).data.map(x=>x.id));
+        const keep = new Set((await this.gatewayCatalog(target, desired.gateway.key)).map(x => x.id));
         this.catalog=this.catalog.filter(x=>keep.has(x.id));
         const saved=readJSON(this.catalogFile);
         if(saved.enabled) this.publishCatalog(desired);
@@ -282,14 +294,7 @@ export class KimiAdapter {
       return;
     }
     try {
-      // The agent key's /models may name only its selected provider. Start
-      // from the public catalog, then apply this agent's exact visibility.
-      const response = await this.fetchImpl(target + '/models', {method: 'GET', headers: {Accept: 'application/json'},
-        signal: AbortSignal.timeout(6000), redirect: 'error', proxy: ''});
-      if (!response.ok || Number(response.headers.get('content-length') || 0) > 8 * 1024 * 1024) throw Error('catalog_unavailable');
-      const text = await response.text();
-      if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw Error('catalog_unavailable');
-      const catalog = normalizeModels(this.selectedCatalog(JSON.parse(text)),{allowEmpty:true});
+      const catalog = await this.gatewayCatalog(target, desired.gateway.key);
       const current = await this.rpcCall(runner, 'conversations.getKimiModelList');
       if (!Array.isArray(current?.models)) throw Error('catalog_unavailable');
       const merged = mergeRuntimeModels(current.models, catalog);
@@ -302,8 +307,8 @@ export class KimiAdapter {
         });
       });
       if (!same) {
-        if (!fs.existsSync(path.join(this.stateDir, 'before-menu-models.json'))) {
-          atomicJSON(path.join(this.stateDir, 'before-menu-models.json'), {models: current.models, current: readJSON(this.configFile).model.current});
+        if (!fs.existsSync(this.modelBackupFile)) {
+          atomicJSON(this.modelBackupFile, {models: current.models, current: readJSON(this.configFile).model.current});
         }
         await this.rpcCall(runner, 'conversations.updateKimiModelList', {models: merged});
       }
@@ -367,15 +372,8 @@ export class KimiAdapter {
       await this.rpcCall(runner, 'models.current');
       await this.listen();
       if (!fs.readFileSync(this.configFile).equals(bytes)) throw Error('kimi_config_changed');
-      // Back up only before our first change, outside the distributable package.
-      const backup = path.join(this.stateDir, 'backups', 'before-connect-' + Date.now() + '.json');
-      if (oldBase !== this.state.bridgeURL) {
-        fs.mkdirSync(path.dirname(backup), { recursive: true, mode: 0o700 });
-        fs.writeFileSync(backup, bytes, { flag: 'wx', mode: 0o600 });
-      }
       const previous = this.state;
-      this.state = { active: true, originalBase, bridgeURL: this.bridgeURL, generation, signature,
-        model: desired.model, backup: oldBase !== previous.bridgeURL ? backup : previous.backup };
+      this.state = { active: true, originalBase, bridgeURL: this.bridgeURL, generation, signature, model: desired.model };
       // Persist recovery ownership before writing the Kimi file.
       this.saveState();
       this.changeBase(oldBase, this.bridgeURL);
