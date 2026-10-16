@@ -1,0 +1,30 @@
+{
+  "name": "@magpie-community/agent-kimi-desktop",
+  "version": "0.1.0",
+  "description": "Kimi desktop Work as a Magpie agent, using the models configured in Magpie",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "kimi-desktop.agent.js",
+    "index.mjs",
+    "adapter.mjs",
+    "rpc.mjs",
+    "catalog.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-agent",
+    "kimi",
+    "kimi-work"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/magpie-community/plugins.git",
+    "directory": "packages/kimi-desktop"
+  },
+  "magpie": {
+    "agent": "./kimi-desktop.agent.js"
+  }
+}
