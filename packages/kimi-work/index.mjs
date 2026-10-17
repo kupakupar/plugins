@@ -9,7 +9,7 @@ const MEMBER = 'https://www.kimi.com/apiv2/kimi.gateway.membership.v2.Membership
 const {version} = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 const UA = 'Magpie Kimi Work provider/' + version;
 const expired = () => Object.assign(Error('请先在本机 Kimi 桌面版登录 Work，再重新连接 Kimi Work 供应商。'), {signIn:'expired',code:'kimi_work_login_expired'});
-const unavailable = () => Object.assign(Error('Kimi Work 连接失败，请检查本机网络后重试。'), {code:'kimi_work_connection_failed'});
+const unavailable = error => Object.assign(Error('Kimi Work 连接失败：' + (error?.cause?.code || error?.message || '未知网络错误'), {cause:error}), {code:'kimi_work_connection_failed'});
 const percent = x => typeof x === 'number' && Number.isFinite(x) ? Math.max(0,Math.min(100,x*100)) : undefined;
 
 function desktopFile({home=os.homedir(), platform=process.platform, appdata=process.env.APPDATA}={}) {
@@ -118,19 +118,10 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch}={}) {
           const options=request?{...init,body:request.body,signal:request.signal,duplex:'half'}:init;
           let response;
           try { response=await fetchImpl(BASE+'/chat/completions',{...options,method:'POST',headers,redirect:'error'}); }
-          catch(error) { if(options.signal?.aborted)throw error; throw unavailable(); }
+          catch(error) { if(options.signal?.aborted)throw error; throw unavailable(error); }
           if(response.status===401) { await response.body?.cancel(); throw expired(); }
-          if(response.status===429 || response.status>=500) {
-            const limited=response.status===429;
-            const safeHeaders=new Headers({'Content-Type':'application/json','Cache-Control':'no-store'});
-            const retry=response.headers.get('retry-after');
-            if(retry)safeHeaders.set('Retry-After',retry);
-            await response.body?.cancel();
-            return new Response(JSON.stringify({error:{type:limited?'rate_limit_error':'server_error',
-              code:limited?'kimi_work_rate_limited':'kimi_work_upstream_unavailable',
-              message:limited?'Kimi Work 当前额度或并发受限，请稍后重试。':'Kimi Work 服务暂不可用，请稍后重试。'}}),
-              {status:response.status,headers:safeHeaders});
-          }
+          // Magpie classifies rate vs quota from the upstream response. Keep
+          // its wording, reset details and Retry-After instead of guessing.
           return response;
         },
       }),

@@ -49,26 +49,47 @@ test('requests preserve prompts, tools, streaming and cancellation while rotatin
   expect(calls).toHaveLength(2);
 });
 
-test('fixed upstream errors distinguish login, limits and service failures without raw response leakage', async () => {
-  for (const status of [401, 429, 502]) {
-    const p = I.createPlugin({readSession: () => session, fetchImpl: async () => new Response('synthetic-private-upstream-detail',
-      {status, headers: {'Retry-After': '30'}})});
-    const loader = await p.auth.loader(async () => auth);
-    const request = () => loader.fetch(I.BASE + '/chat/completions', {method: 'POST', body: '{}'});
-    if (status === 401) await expect(request()).rejects.toMatchObject({signIn: 'expired', code: 'kimi_work_login_expired'});
-    else {
-      const response = await request();
-      expect(response.status).toBe(status);
-      expect(response.headers.get('retry-after')).toBe('30');
-      const text = await response.text();
-      expect(text).not.toContain('synthetic-private');
-      expect(JSON.parse(text).error.code).toBe(status === 429 ? 'kimi_work_rate_limited' : 'kimi_work_upstream_unavailable');
-    }
-  }
-  const p = I.createPlugin({readSession: () => session, fetchImpl: async () => {throw Error('synthetic-secret-url');}});
+test('a rejected desktop token requires reconnecting the provider', async () => {
+  const p = I.createPlugin({readSession: () => session, fetchImpl: async () => new Response('{}', {status: 401})});
   const loader = await p.auth.loader(async () => auth);
-  await expect(loader.fetch(I.BASE + '/chat/completions', {method: 'POST'})).rejects.toMatchObject({code: 'kimi_work_connection_failed'});
-  await expect(loader.fetch('https://example.invalid/chat/completions', {method: 'POST'})).rejects.toThrow('仅接受官方');
+  await expect(loader.fetch(I.BASE + '/chat/completions', {method: 'POST'}))
+    .rejects.toMatchObject({signIn: 'expired', code: 'kimi_work_login_expired'});
+});
+
+for (const {name, status, body, type} of [
+  {name: 'concurrency 429 retains rate-limit wording without adding quota wording', status: 429,
+    body: JSON.stringify({error: {type: 'rate_limit_error', code: 'concurrency_limit', message: 'Too many requests'}}), type: 'application/json'},
+  {name: 'quota 429 retains the upstream allowance and reset details', status: 429,
+    body: JSON.stringify({error: {type: 'quota_exceeded', message: 'Plan quota exhausted', resetsAt: '2030-01-01T00:00:00Z'}}), type: 'application/json'},
+  {name: '5xx retains even a non-JSON upstream failure', status: 502, body: 'Bad gateway: upstream unavailable', type: 'text/plain'},
+]) test(name, async () => {
+  const upstream = new Response(body, {status, statusText: 'Upstream failure', headers: {'Retry-After': '30', 'Content-Type': type}});
+  const p = I.createPlugin({readSession: () => session, fetchImpl: async () => upstream});
+  const loader = await p.auth.loader(async () => auth);
+  const response = await loader.fetch(I.BASE + '/chat/completions', {method: 'POST', body: '{}'});
+  expect(response).toBe(upstream);
+  expect(response.status).toBe(status);
+  expect(response.headers.get('retry-after')).toBe('30');
+  expect(response.headers.get('content-type')).toBe(type);
+  expect(await response.text()).toBe(body);
+});
+
+test('network failures keep diagnostic causes and ordinary fetch messages', async () => {
+  for (const error of [Error('fetch failed', {cause: {code: 'ENOTFOUND'}}), Error('proxy connection refused')]) {
+    const p = I.createPlugin({readSession: () => session, fetchImpl: async () => {throw error;}});
+    const loader = await p.auth.loader(async () => auth);
+    await expect(loader.fetch(I.BASE + '/chat/completions', {method: 'POST'})).rejects.toMatchObject({
+      code: 'kimi_work_connection_failed', cause: error,
+      message: 'Kimi Work 连接失败：' + (error.cause?.code || error.message),
+    });
+  }
+});
+
+test('cancellation keeps the original abort error', async () => {
+  const controller = new AbortController(), error = new DOMException('Cancelled', 'AbortError');
+  const p = I.createPlugin({readSession: () => session, fetchImpl: async () => {controller.abort(); throw error;}});
+  const loader = await p.auth.loader(async () => auth);
+  await expect(loader.fetch(I.BASE + '/chat/completions', {method: 'POST', signal: controller.signal})).rejects.toBe(error);
 });
 
 test('desktop import is read-only and never substitutes a Code endpoint', () => {
