@@ -1,5 +1,11 @@
 # macOS compatibility record
 
+## Upgrade 0.1.4
+
+On Windows 11, 2026-10-17, the upgraded provider read the existing ordinary desktop Work sign-in and live model catalog/usage. An isolated adapter inserted a shared instruction and passed its messages through this provider unchanged to the real Work service. The streamed response was HTTP 200 with `[DONE]` and the exact marker present only in that instruction. The live desktop applications and their configurations were not switched for this request. Four synthetic regression tests cover credential rotation, account binding, Request bodies, prompt/tool/stream preservation, login/limit/service/network error categories and read-only desktop import.
+
+On macOS 26.6.2 arm64, Kimi 3.2.17 build 3.2.17.4, at 2026-10-17 04:37 UTC, version 0.1.4 again read the existing Work sign-in, discovered `k3-agent` and `k2d8-preview`, and returned one shared membership window. This upgrade probe did not submit a Mac desktop conversation; the earlier streamed macOS inference evidence below remains a separate record.
+
 Observed at **2026-10-16 20:09 UTC** (2026-10-17 04:09 UTC+8).
 
 | Component | Observed version |

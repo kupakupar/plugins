@@ -8,7 +8,8 @@ const BASE = 'https://agent-gw.kimi.com/coding/v1';
 const MEMBER = 'https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/';
 const {version} = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 const UA = 'Magpie Kimi Work provider/' + version;
-const expired = () => Object.assign(Error('请先在本机 Kimi 桌面版登录 Work，再重新连接 Kimi Work 供应商。'), {signIn:'expired'});
+const expired = () => Object.assign(Error('请先在本机 Kimi 桌面版登录 Work，再重新连接 Kimi Work 供应商。'), {signIn:'expired',code:'kimi_work_login_expired'});
+const unavailable = () => Object.assign(Error('Kimi Work 连接失败，请检查本机网络后重试。'), {code:'kimi_work_connection_failed'});
 const percent = x => typeof x === 'number' && Number.isFinite(x) ? Math.max(0,Math.min(100,x*100)) : undefined;
 
 function desktopFile({home=os.homedir(), platform=process.platform, appdata=process.env.APPDATA}={}) {
@@ -39,6 +40,7 @@ function modelRows(payload) {
   for(const m of payload.data) {
     if(typeof m.id!=='string'||!m.id||m.id.length>256||/[\x00-\x20/]/.test(m.id)) continue;
     const variants=Object.create(null);
+    if(m.reasoningEffortOptions!==undefined&&!Array.isArray(m.reasoningEffortOptions))throw Error('Kimi Work 思考档位格式无效。');
     for(const x of m.reasoningEffortOptions||[]) {
       const effort=String(x.effort||'').replace(/^REASONING_EFFORT_/,'').toLowerCase();
       if(!/^[a-z][a-z0-9_-]{0,63}$/.test(effort))throw Error('Kimi Work 思考档位格式无效。');
@@ -114,7 +116,22 @@ function createPlugin({readSession=readDesktop,fetchImpl=globalThis.fetch}={}) {
           // Preserve messages, tools, stream and abort signal. There is no
           // fallback to api.kimi.com, a Code API key, or another provider.
           const options=request?{...init,body:request.body,signal:request.signal,duplex:'half'}:init;
-          return fetchImpl(BASE+'/chat/completions',{...options,method:'POST',headers,redirect:'error'});
+          let response;
+          try { response=await fetchImpl(BASE+'/chat/completions',{...options,method:'POST',headers,redirect:'error'}); }
+          catch(error) { if(options.signal?.aborted)throw error; throw unavailable(); }
+          if(response.status===401) { await response.body?.cancel(); throw expired(); }
+          if(response.status===429 || response.status>=500) {
+            const limited=response.status===429;
+            const safeHeaders=new Headers({'Content-Type':'application/json','Cache-Control':'no-store'});
+            const retry=response.headers.get('retry-after');
+            if(retry)safeHeaders.set('Retry-After',retry);
+            await response.body?.cancel();
+            return new Response(JSON.stringify({error:{type:limited?'rate_limit_error':'server_error',
+              code:limited?'kimi_work_rate_limited':'kimi_work_upstream_unavailable',
+              message:limited?'Kimi Work 当前额度或并发受限，请稍后重试。':'Kimi Work 服务暂不可用，请稍后重试。'}}),
+              {status:response.status,headers:safeHeaders});
+          }
+          return response;
         },
       }),
       usage:async getAuth=>{

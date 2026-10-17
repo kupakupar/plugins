@@ -13,6 +13,10 @@ Open Kimi desktop and sign in to Work on the same computer first. Choose **ä½¿ç”
 
 The account's models and reasoning options come from `https://agent-gw.kimi.com/coding/v1/models`. Chat completions, streaming, tool calls and cancellation use the same Work gateway. The request uses this plugin's own User-Agent; it does not impersonate Kimi's desktop client. It never uses `api.kimi.com` or a Kimi Code API key.
 
+Version 0.1.4 preserves the calling agent's shared instructions, prompts, history and tools unchanged. Instructions, MCP and skills are assigned to that agent in Magpie's Library; the provider does not create a second target or enable resources on its own. The ordinary Kimi agent's Library support starts at `@magpie-community/agent-kimi-desktop` 0.1.1.
+
+Inference failures have fixed, non-sensitive categories: `kimi_work_login_expired` (HTTP 401, reconnect after signing in to desktop Work), `kimi_work_rate_limited` (HTTP 429, original Retry-After preserved), `kimi_work_upstream_unavailable` (HTTP 5xx) and `kimi_work_connection_failed` (network failure). Rate limits and service failures do not invalidate the desktop sign-in. Cancellation stays cancellation. No automatic retry sends a conversation twice or falls back to Code.
+
 Models use standard context, capped at 262,144 tokens, rather than silently enabling the higher-priced XL context. The fallback model is `kimi-work/k3-agent`; the signed-in account's live catalog replaces it.
 
 Usage comes from Kimi's membership `GetSubscriptionStats` endpoint and is labelled **shared membership allowance**, not a separate free Work allowance. No reset time is reported: `subscriptionBalance.expireTime` and `upcomingExpiration.timestamp` are expiration fields, and have not been verified to describe allowance resets. An observed Windows request was classified by Kimi as `FEATURE_WORK` while the Code five-hour and weekly ratios stayed unchanged. This is an observation, not a promise about future quota accounting: Kimi controls billing, shared allowances, access and rate limits.
