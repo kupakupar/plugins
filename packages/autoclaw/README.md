@@ -35,7 +35,20 @@ OpenCode 同样可加载（`opencode auth login`）。登录信息保存在 magp
 
 - 对话走 `POST {host}/autoclaw-proxy/proxy/autoclaw/v1/chat/completions`（`X-Authorization` 鉴权）；
 - token 过期前自动轮换（refresh token 一次一换，`auth.refresh` 钩子交给 magpie 串行化，不会双花）；
-- 积分余额通过 `auth.usage` 显示（纯积分制，无总量上限，`aside` 窗口展示余额）；
+- 积分余额通过 `auth.usage` 的 `balance` 显示（纯积分制，无总量上限，细分钱包写在括号里），
+  同时作为预付钱包窗口 `{ name: "积分余额", balance, unit: "积分" }` 上报（magpie ≥ v0.1.1790，
+  #3950）：路由按真实余额认识和排位账号，不发明百分比，余额 0 算用完；更早的 magpie
+  不认识 `balance`，账号维持原状。
+  上游没有积分流水/用量接口（wallets.v2 只有余额），「本轮消耗」窗口**由本地余额差值算**：
+  每次 `usage()` 记下本轮峰值，`峰值 − 当前 = 本轮已消耗`，**任何上涨**（相对上次
+  观察到的余额，含从 0 回升——每日签到、礼包、兑换）都开新一轮，不等涨过旧峰值（签到常在花费
+  之后到）。因为每天签到都会开新一轮，「本轮」≈「自今天签到以来」。这个窗口带
+  `aside: true`，只展示、不参与路由：它的百分比是「自上次上涨以来花掉的比例」，不是池子剩余。
+  `total_balance` 为 null/空串/非数时按未知处理（「积分响应异常」），不记账。
+  状态按账号（键复用 `signinAccountKey`，#254：uid，没 uid 按 refresh token 哈希）存在
+  `$XDG_CONFIG_HOME/magpie/autoclaw-usage.json`（或 `~/.config/magpie/`，`AUTOCLAW_USAGE_STATE_FILE`
+  可改址），临时文件 + rename 写入，30 天没动的条目清走；插件更新不会丢。
+  测试可用 `_internal.setUsageStatePath` 把状态文件指到临时目录。
 - **国际版登录是完整本地实现**：插件在 127.0.0.1 上取官方 TokenServer 端口池中的一个端口
   （18432/19654/19723/53699，OAuth client 回调白名单；被占自动顺延）起临时服务器，内嵌引导页完成
   阿里滑块验证（`AliyunCaptcha` SDK，`ali_captcha_verify_param` 回执）→ 获取授权页 →
@@ -81,11 +94,15 @@ AutoClaw 对话网关对请求形状有硬性要求，缺任一条都回 `406 No
 - **不发送 X-Harness-Type**：上游收到 `X-Harness-Type` 即报 406，已删除该残留请求头
 - **改写外部 Harness 身份声明**：上游拦截 system 中包含的外部 agent 身份句（如 `You are Codex`、`You are Claude Code` 等），插件的 `unflag` 会自动将其替换为兼容措辞，避免 406 拦截
 
+- **官方客户端指纹（国际版对话）**：国际版对话请求带官方 AutoClaw 2.0.3 桌面端（`official` 渠道）的整套请求头，取自其 AppImage 的 `dist/main.cjs`：`X-Channel: official`、`X-Version: 2.0.3`、`X-Lang: en`、`X-Client-Type: pc`、`X-Product: autoclaw`、`x_trace_id: autoclaw-desktop`、`X-Auth-Appid/X-Auth-TimeStamp/X-Auth-Sign`（`md5("100003&<秒级时间戳>&<appKey>")`，与登录/积分接口同一签名）、`X-Request-Id` = `X-Trace-Id`（每次请求一个 UUID）、`X-Session-Id`（同一对话不变的 UUID，插件由对话首条消息导出）、OpenAI SDK 6.26.0 的 `User-Agent` 与 `X-Stainless-*`。`X-Tm` 与官方 `managedPlatform()` 一致：macOS `mac`、Windows `win`、Linux `linux`（x64/arm64 相同）。网关只在**非官方指纹**旁拒收 `X-Tm: linux`（403 `forbidden`，#367）；0.2.7–0.2.11 发的 `linux-x64` 只是绕过，不是官方值。
+
 国内版 `autoclaw-cn` 走 AutoClaw 2.1.0 managed gateway（`autoglm-acceleration-api.zhipuai.cn`）；国际版 `autoclaw` 走海外直连网关（`autoglm-api.autoglm.ai`）。两者均已通过真实调用与推理验证。
 
 ## 已知行为
 
 - 手机号账号只认国内 host（走 managed gateway，401/403 标记登录失效）；z.ai/Google 账号只认国际 host（401/403 自动换侧重试，均拒绝时标记失效）。
+- 额度用完不算登录失效：上游以 `403` + `{"code":810000,"message":"GLM-5.3 免费额度已用完,…"}` 回答时（或 403 正文说额度/余额已用完），插件转成 `429`，原样带上游文案，登录保留（`X-Magpie-Sign-In: kept`），国际版也不再换 host 重试（plugins#274）。
+- 账号被封不算登录失效：上游以 `403` + `{"code":410004,"message":"The account has been banned"}` 回答时（或 code/message 字段说 banned / 封禁 / 账号异常 / 账号被冻结等），对话、刷新、积分与签到都原样带上游文案，对话转成 `403 permission_error`，登录保留（`X-Magpie-Sign-In: kept`），不再换 host 重试。其他 401/403 仍按登录失效处理。
 - 上游模型白名单随版本变化，模型下线时上游返回 `400 非法模型`（原样透传错误消息）。
 - refresh token 与 AutoClaw 桌面端**共用会互踢**（双方都轮换），插件账号请勿同时在桌面端登录。
 - 上游偶发改协议时，`CLIENT_VERSION` / 端点路径可能需要随官方客户端更新。

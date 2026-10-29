@@ -3,14 +3,21 @@
 // trial account on 2026-10-12, byte for byte (testdata/queued-10605.json).
 // The other codes are read as Qoder's own client reads them (QoderErrorCode
 // in Qoder.app's qoder-agent-sdk worker): only 105 is loginExpired there.
-import { afterEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { QoderAuthPlugin, _internal } from "./index.mjs"
 
 const QUEUED = readFileSync(new URL("./testdata/queued-10605.json", import.meta.url), "utf8").trim()
 
 const real = globalThis.fetch
-afterEach(() => (globalThis.fetch = real))
+// these are Qoder still queued once the wait is over: queue.test.mjs has
+// the wait itself
+const budget = _internal.QUEUE.budget
+beforeEach(() => (_internal.QUEUE.budget = 0))
+afterEach(() => {
+  globalThis.fetch = real
+  _internal.QUEUE.budget = budget
+})
 
 const API_CHAT = "https://api3.qoder.sh/v1/chat/completions"
 const ASK = { method: "POST", body: JSON.stringify({ model: "efficient", messages: [{ role: "user", content: "hi" }] }) }
@@ -75,8 +82,8 @@ test("Qoder's other codes on a 403 aren't a lapsed sign-in either; 105 and no co
     expect(f(code, "credits used up")).toEqual({ status: 429, message: "usage limit reached: credits used up", signIn: "" })
   for (const code of ["406", "416", "430", "80411", "80412", "100400", "100401", "100403"])
     expect(f(code, "no")).toEqual({ status: 400, message: `Qoder refused the request (${code}): no`, signIn: "" })
-  expect(f("105", "login expired")).toEqual({ status: 401, message: "the sign-in lapsed — sign in again (Qoder said 403: login expired)" })
-  expect(_internal.failure(403, "")).toEqual({ status: 401, message: "the sign-in lapsed — sign in again" })
+  expect(f("105", "login expired")).toEqual({ status: 401, message: "the sign-in lapsed — sign in again (Qoder said 403: login expired)", lapsed: true })
+  expect(_internal.failure(403, "")).toEqual({ status: 401, message: "the sign-in lapsed — sign in again", lapsed: true })
 })
 
 test("a BOM in an SSE error body must not turn a resource limit into expired auth", async () => {

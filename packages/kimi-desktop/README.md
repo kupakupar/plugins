@@ -38,7 +38,7 @@ The adapter does not reload a busy Work runtime. If Kimi independently changes i
 - `~/.config/magpie-kimi/status.json`: fixed status categories, without credentials.
 - `~/.config/magpie-kimi/adapter-state.json`: original service address and connection ownership; no Kimi login credentials.
 - `~/.config/magpie-kimi/before-menu-models.json`: one snapshot of the original model list/current choice, removed after a clean disconnect. No full configuration or credential backup is written.
-- Kimi configuration: `kimi-desktop/daimon-share/daimon/config.json` under the platform's application-support directory.
+- Kimi configuration: `daimon/config.json` in Kimi's `daimon-share` folder: where `kimi-desktop/daimon-storage.json` points (`shareDir`; Kimi 3.2.21 on Windows writes it when installed on another drive, e.g. `D:\KimiData\daimon-share`, and on any system when its storage is moved), else `kimi-desktop/daimon-share`, under the platform's application-support directory (`%APPDATA%`, `~/Library/Application Support`, `~/.config`).
 
 Verified with Windows 11, Kimi 3.2.17.10 and official Magpie 0.1.1275, including an actual Work request through Magpie. The [macOS record](COMPATIBILITY.md) verifies real control methods, connect/disconnect restoration and a real streamed bridge request on macOS 26.6.2 arm64, Kimi 3.2.17 build 3.2.17.4 and official Magpie 0.1.1276. That request was initiated by an HTTP test client; a macOS desktop UI-submitted Work turn remains unverified. The supported runtime has provider `daimon-kimi-code` with original service `https://agent-gw.kimi.com/coding/v1`; other layouts stop with `unsupported_kimi_config`.
 
@@ -51,6 +51,10 @@ bun test packages/kimi-desktop/kimi-desktop.test.mjs
 ```
 
 The model catalog is fetched from Magpie's `/v1/models` with this agent's credential and registered User-Agent. Magpie owns its visibility, picked/hidden models, disables and ordering. The adapter never opens Magpie's `providers.json` or `settings.json`. It rechecks the gateway catalog before every inference; removed selections are refused even during a running turn, and an unavailable catalog returns a fixed error instead of falling back to an unrestricted list. This package includes no Electron injection hook or model-menu patch. The icon is Kimi's desktop application icon.
+
+Thinking models with a complete, recognized effort list that omits `none` also declare `always_thinking` in both the runtime and menu model configurations. Kimi can then resolve an old Off selection using that model's thinking defaults. A list containing `none` remains switchable; missing or unrecognized effort metadata does not imply mandatory thinking. The adapter does not rewrite the inference request's thinking fields. See the [3.2.18 compatibility check](COMPATIBILITY.md#kimi-3218-isolated-compatibility-check).
+
+The 3.2.18 check includes real model requests, four background-control turns, and three signed-in UI submissions in a separate official desktop profile. Both real models completed native read-tool loops, and the final UI turn recalled the earlier history without a tool call. The signed-in UI retained native model labels; this does not verify custom Magpie aliases in the online menu. The full record distinguishes these checks from the synthetic core tests.
 
 ## Shutdown and manual recovery
 
